@@ -1,9 +1,10 @@
-from youtube_transcript_api import YouTubeTranscriptApi
-import re
-import os
 import sys
+import os
+import re
 import traceback
+import random
 import yt_dlp
+from youtube_transcript_api import YouTubeTranscriptApi
 
 from g4f.client import Client
 from g4f.Provider import PollinationsAI
@@ -17,18 +18,6 @@ client = Client(provider=PollinationsAI)
 ydl_opts = {'quiet': True}
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-cookies_dir = os.path.join(BASE_DIR, "har_and_cookies")
-os.makedirs(cookies_dir, exist_ok=True)
-
-set_cookies_dir(cookies_dir)
-read_cookie_files()
-
-
-def get_video_id(url):
-    match = re.search(r"(?:v=|youtu\.be/)([a-zA-Z0-9_-]{11})", url)
-    if match:
-        return match.group(1)
-    raise ValueError("ID відео не знайдено")
 
 
 class DesktopPet(QWidget):
@@ -36,155 +25,112 @@ class DesktopPet(QWidget):
         super().__init__()
 
         self.drag_position = None
-        self.timeline = []
-        self.current_index = 0
+        self.questions_list = []
+        self.current_percent = 0
+        self.step_increment = 5
+
+        # Попередньо завантажуємо картинки, щоб не було блимання при читанні з диска
+        self.img_talking = QPixmap(os.path.join(BASE_DIR, "pet1.png"))
+        self.img_idle = QPixmap(os.path.join(BASE_DIR, "pet2.png"))
 
         self.initUI()
-
-        note_path = os.path.join(BASE_DIR, "note.txt")
-        with open(note_path, "w", encoding="utf-8") as file:
-            pass
 
         try:
             url = input("Введіть посилання на YouTube відео: ").strip()
 
+            print("Отримання інформації про відео...")
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
                 duration = int(info.get('duration', 0))
+                if duration == 0: duration = 600
                 print(f"Тривалість: {duration} секунд")
 
-            video_id = get_video_id(url)
+            self.step_delay_ms = int(((duration * self.step_increment) / 100) * 1000)
+            print(f"Фрази з'являтимуться кожні {int(self.step_delay_ms / 1000)} сек.")
 
-            api = YouTubeTranscriptApi()
-            transcript = api.fetch(video_id, languages=["uk", "en"])
-
-            for line in transcript:
-                with open(note_path, "a", encoding="utf-8") as file:
-                    file.write(line.text + "\n")
-
-            with open(note_path, "r", encoding="utf-8") as file:
-                content = file.read()
-
+            print("Генерація фраз...")
             response = client.chat.completions.create(
                 model="openai",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": (
-                            "згенеруй 10 коротких фраз, спираючись на субтитри відео з таймкодами. "
-                            "фрази мають стосуватись кожних 10% пройденого відео. "
-                            "пиши так, ніби ти дивишся це відео разом із користувачем, "
-                            "та звертаєшся до нього. не включай таймкоди, номери запитань, та спеціальні символи до вихідного тексту. "
-                            "Ось субтитри:\n" + content
-                        )
-                    }
-                ]
+                messages=[{
+                    "role": "user",
+                    "content": "Згенеруй 50 коротких реакцій на документальне відео без номерів, кожна з нового рядка. не додавай порядкові номера кожної фрази "
+                }]
             )
 
-            questions_text = response.choices[0].message.content.strip()
-            print("Згенеровані фрази:\n")
-            print(questions_text)
+            content = response.choices[0].message.content.strip()
+            self.questions_list = [line.strip("•- *") for line in content.split("\n") if line.strip()]
 
-            questions_list = [q.strip("•- \t") for q in questions_text.split("\n") if q.strip()]
-            if not questions_list:
-                questions_list = [questions_text]
+            # Таймери
+            self.main_timer = QTimer(self)
+            self.main_timer.timeout.connect(self.show_new_phrase)
 
-            image_path = os.path.join(BASE_DIR, "pet1.png")
-            step_delay = max(1, duration / 100)
-
-            self.timeline.append({
-                "text": "Привіт, я твій десктоп пет.",
-                "delay": 1,
-                "image": image_path
-            })
-
-            for question in questions_list:
-                self.timeline.append({
-                    "text": question,
-                    "delay": step_delay,
-                    "image": image_path
-                })
-
-            self.timer = QTimer(self)
-            self.timer.setSingleShot(True)
-            self.timer.timeout.connect(self.show_next_step)
+            self.hide_timer = QTimer(self)
+            self.hide_timer.setSingleShot(True)
+            self.hide_timer.timeout.connect(self.hide_text)
 
             self.show()
-            self.raise_()
-            self.activateWindow()
-
-            # Показуємо перший крок ОДРАЗУ, а не через секунду
-            if self.timeline:
-                self.show_next_step()
+            self.show_new_phrase()
+            self.main_timer.start(self.step_delay_ms)
 
         except Exception as e:
-            print("Помилка:", e)
             traceback.print_exc()
-
-            self.text_label.setText(f"Помилка:\n{e}")
-            self.text_label.adjustSize()
+            self.text_label.setText(f"Помилка: {e}")
             self.text_label.show()
             self.show()
-            self.raise_()
-            self.activateWindow()
 
     def initUI(self):
-        self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint |
-            Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.Tool
-        )
-
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-
         self.resize(650, 500)
-        self.move(100, 100)
 
         self.pet_label = QLabel(self)
         self.pet_label.move(30, 120)
+
+        # Початковий стан — pet2 (мовчить)
+        if not self.img_idle.isNull():
+            self.pet_label.setPixmap(self.img_idle)
+            self.pet_label.adjustSize()
 
         self.text_label = QLabel("", self)
         self.text_label.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
         self.text_label.setWordWrap(True)
         self.text_label.setStyleSheet("""
             color: white;
-            background-color: rgba(20, 20, 20, 220);
-            padding: 10px;
-            border-radius: 12px;
+            background-color: rgba(20, 20, 20, 230);
+            padding: 12px;
+            border-radius: 15px;
             border: 2px solid #ffcc00;
         """)
-        self.text_label.setFixedWidth(500)
+        self.text_label.setFixedWidth(350)
         self.text_label.move(20, 20)
         self.text_label.hide()
 
-    def show_next_step(self):
-        if self.current_index >= len(self.timeline):
-            print("Всі дії виконано.")
+    def show_new_phrase(self):
+        if self.current_percent >= 100:
+            self.main_timer.stop()
             return
 
-        data = self.timeline[self.current_index]
+        if self.questions_list:
+            # Змінюємо на pet1 (говорить)
+            if not self.img_talking.isNull():
+                self.pet_label.setPixmap(self.img_talking)
 
-        pixmap = QPixmap(data["image"])
-        if not pixmap.isNull():
-            self.pet_label.setPixmap(pixmap)
-            self.pet_label.adjustSize()
-            self.pet_label.show()
-        else:
-            print(f"Помилка: Не вдалося знайти файл {data['image']}")
+            phrase = random.choice(self.questions_list)
+            self.text_label.setText(phrase)
+            self.text_label.adjustSize()
+            self.text_label.show()
 
-        self.text_label.setText(data["text"])
-        self.text_label.adjustSize()
-        self.text_label.show()
+            # Фраза висить 6 секунд, потім ховаємо і міняємо картинку
+            self.hide_timer.start(6000)
 
-        self.show()
-        self.raise_()
-        self.activateWindow()
+        self.current_percent += self.step_increment
+        print(f"Прогрес: {self.current_percent}%")
 
-        self.current_index += 1
-
-        if self.current_index < len(self.timeline):
-            next_delay = int(self.timeline[self.current_index]["delay"] * 1000)
-            self.timer.start(next_delay)
+    def hide_text(self):
+        self.text_label.hide()
+        # Повертаємо pet2 (мовчить)
+        if not self.img_idle.isNull():
+            self.pet_label.setPixmap(self.img_idle)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
